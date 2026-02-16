@@ -44,29 +44,30 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 #  CONFIG
 # =====================================================================
-CSV_FILE = "hız testi 4k.csv"         # Influencer username listesi
+CSV_FILE = "speed_test_4k.csv"        # Influencer username listesi
 RESULTS_DIR = "batch_results"          # Çıktı klasörü
 
-CONCURRENCY_X = 4                     # Aynı anda kaç influencer'ın takipçisi çekilecek
+CONCURRENCY_X = 6                     # Aynı anda kaç influencer'ın takipçisi çekilecek (A40 için artırıldı)
 FOLLOWER_COUNT = 1200                  # Her influencer için çekilecek takipçi sayısı
 
-GPU_DRAIN_INTERVAL = 2.0              # Queue'dan item toplama max bekleme süresi (saniye)
+GPU_DRAIN_INTERVAL = 1.0              # Queue'dan item toplama max bekleme süresi (saniye)
 
-MAX_CONCURRENT_DOWNLOADS = 300        # Eşzamanlı avatar indirme limiti (4 inf × 1200 = 4800 image)
+MAX_CONCURRENT_DOWNLOADS = 500        # Eşzamanlı avatar indirme limiti (A40 — hızlı CPU/network)
 DOWNLOAD_TIMEOUT_SECONDS = 3          # Avatar indirme timeout
+GPU_QUEUE_MAXSIZE = 15_000            # Queue backpressure: CPU GPU'ya çok fark atmasın
 
 HASHMAP_MAX_SIZE = 1_000_000          # Follower cache max entry
 CACHE_SAVE_INTERVAL = 50              # Kaç chunk'ta bir cache diske yazılsın
 BATCH_CSV_SIZE = 50                   # Kaç influencer'da bir ara CSV dosyası oluşturulacak
 
-GPU_MEMORY_UTILIZATION = 0.90
+GPU_MEMORY_UTILIZATION = 0.95         # A40 48GB — daha fazla VRAM kullan
 MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
 MAX_NEW_TOKENS = 20
 MAX_MODEL_LEN = 1536
 
 # RapidAPI
 RAPIDAPI_HOST = "tiktok-scraper7.p.rapidapi.com"
-API_KEY = os.environ.get("API_KEY", "")
+API_KEY = os.environ.get("API_KEY", "a8cad3edb7msh3e877eda255d39dp1d44e6jsn06c6f0f05b68")
 
 # Valid categories
 VALID_GENDERS = {"male", "female", "unknown"}
@@ -601,7 +602,7 @@ async def main():
     log.info("=" * 60)
     log.info("ADIM 3: GPU consumer thread başlatılıyor...")
     log.info("=" * 60)
-    gpu_q: queue.Queue = queue.Queue()  # Unbounded — producer/consumer hız farkını absorbe eder
+    gpu_q: queue.Queue = queue.Queue(maxsize=GPU_QUEUE_MAXSIZE)  # Backpressure — CPU GPU'ya çok fark atmasın
 
     gpu_thread = threading.Thread(
         target=gpu_consumer,
@@ -633,7 +634,7 @@ async def main():
 
     # API session (TikTok RapidAPI)
     api_connector = aiohttp.TCPConnector(
-        limit=CONCURRENCY_X * 3,  # Her influencer ~6 request, biraz headroom
+        limit=CONCURRENCY_X * 4,  # Her influencer ~6 request, biraz headroom
         ttl_dns_cache=300,
         enable_cleanup_closed=True,
     )
@@ -641,7 +642,7 @@ async def main():
     # Download session (avatar resimleri)
     dl_connector = aiohttp.TCPConnector(
         limit=MAX_CONCURRENT_DOWNLOADS,
-        limit_per_host=200,             # TikTok CDN aynı host'a çok bağlantı
+        limit_per_host=300,             # TikTok CDN aynı host'a çok bağlantı (A40 network)
         ttl_dns_cache=300,
         enable_cleanup_closed=True,
     )
@@ -725,6 +726,9 @@ async def main():
             eta_seconds = avg_per_influencer * remaining_count
             eta_min = eta_seconds / 60
 
+            # Queue durumu
+            q_size = gpu_q.qsize()
+
             # Tek satır chunk özeti
             names = ", ".join(f"@{n}" for n, _, _, _ in chunk_follower_counts)
             total_f = sum(t for _, t, _, _ in chunk_follower_counts)
@@ -735,7 +739,8 @@ async def main():
                 f"{names} | "
                 f"{total_f} takipçi ({total_c} cached, {total_n} yeni) | "
                 f"fetch: {fetch_time:.1f}s, dl: {dl_time:.1f}s, chunk: {chunk_time:.1f}s | "
-                f"ort: {avg_per_influencer:.1f}s/inf, ETA: {eta_min:.0f}dk"
+                f"ort: {avg_per_influencer:.1f}s/inf, ETA: {eta_min:.0f}dk | "
+                f"queue: {q_size}, cache: {len(follower_cache)}"
             )
 
             # --- E) Periyodik cache kaydetme ---
