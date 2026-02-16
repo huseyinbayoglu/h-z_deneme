@@ -46,11 +46,11 @@ warnings.filterwarnings('ignore')
 #  CONFIG
 # =====================================================================
 CSV_FILE = "speed_test_4k.csv"         # Influencer username listesi
-RESULTS_DIR = "/workspace/batch_results"  # Çıktı klasörü (volume dışı, erişilebilir)
-MAX_INFLUENCERS = 15                  # İlk N influencer'ı işle (0 = hepsi)
+RESULTS_DIR = "batch_results"          # Çıktı klasörü
+MAX_INFLUENCERS = 15                   # CSV'den kaç influencer okunacak (0 = hepsi)
 
 CONCURRENCY_X = 6                     # Aynı anda kaç influencer'ın takipçisi çekilecek (A40 için artırıldı)
-FOLLOWER_COUNT = 1200                  # Her influencer için çekilecek takipçi sayısı
+FOLLOWER_COUNT = 800                   # Her influencer için çekilecek takipçi sayısı
 
 GPU_DRAIN_INTERVAL = 1.0              # Queue'dan item toplama max bekleme süresi (saniye)
 
@@ -64,7 +64,7 @@ BATCH_CSV_SIZE = 6                    # Kaç influencer'da bir ara CSV dosyası 
 
 GPU_MEMORY_UTILIZATION = 0.95         # A40 48GB — daha fazla VRAM kullan
 MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
-MAX_NEW_TOKENS = 6                    # Ultra-kısa çıktı: "M 25-34" gibi
+MAX_NEW_TOKENS = 20
 MAX_MODEL_LEN = 1536
 
 # RapidAPI
@@ -75,15 +75,14 @@ API_KEY = os.environ.get("API_KEY", "a8cad3edb7msh3e877eda255d39dp1d44e6jsn06c6f
 VALID_GENDERS = {"male", "female", "unknown"}
 VALID_AGE_RANGES = {"18-", "18-24", "25-34", "35-44", "45+", "unknown"}
 
-# Ultra-kısa prompt: çıktıyı minimize et = daha hızlı inference
 CLASSIFICATION_PROMPT = (
     "Look at this profile picture. "
-    "Respond with ONLY gender and age, nothing else. "
-    "Gender: M (male), W (female), U (unknown). "
-    "Age: 18- 18-24 25-34 35-44 45+ U. "
-    "Format: GENDER AGE\n"
-    "Examples: M 25-34 | W 18-24 | U U\n"
-    "Answer:"
+    "If there is a human, estimate their gender (male or female) and age range. "
+    "Age ranges: 18- (under 18), 18-24, 25-34, 35-44, 45+. "
+    "Respond ONLY with a JSON object, nothing else: "
+    '{"gender": "male/female/unknown", "age_range": "18-/18-24/25-34/35-44/45+/unknown"}'
+    "\nIf no human is visible, respond: "
+    '{"gender": "unknown", "age_range": "unknown"}'
 )
 
 
@@ -289,37 +288,12 @@ def build_qwen_prompt(processor) -> str:
 #  VLM RESPONSE PARSING
 # =====================================================================
 def parse_vlm_response(response_text: str) -> Dict[str, str]:
-    """
-    Ultra-kısa VLM çıktısını parse eder.
-    Beklenen format: 'M 25-34' veya 'W 18-24' veya 'U U'
-    Fallback: JSON ve regex parse da desteklenir.
-    """
+    """VLM çıktısını parse eder. JSON dener, başarısız olursa regex fallback."""
     result = {"gender": "unknown", "age_range": "unknown"}
-    text = response_text.strip()
 
-    # 1) Ultra-kısa format parse: "M 25-34", "W U", vs.
-    parts = text.split()
-    if len(parts) >= 1:
-        g = parts[0].upper()
-        if g == "M":
-            result["gender"] = "male"
-        elif g in ("W", "F"):
-            result["gender"] = "female"
-        elif g == "U":
-            result["gender"] = "unknown"
-
-    if len(parts) >= 2:
-        age = parts[1].strip()
-        if age in VALID_AGE_RANGES:
-            result["age_range"] = age
-
-    # Eğer kısa format işe yaradıysa dön
-    if result["gender"] != "unknown" or result["age_range"] != "unknown":
-        return result
-
-    # 2) JSON fallback
+    # 1) JSON parse
     try:
-        json_match = re.search(r'\{[^}]+\}', text)
+        json_match = re.search(r'\{[^}]+\}', response_text)
         if json_match:
             parsed = json.loads(json_match.group())
             gender = str(parsed.get("gender", "unknown")).strip().lower()
@@ -330,19 +304,19 @@ def parse_vlm_response(response_text: str) -> Dict[str, str]:
     except (json.JSONDecodeError, AttributeError):
         pass
 
-    # 3) Regex fallback
-    text_lower = text.lower()
+    # 2) Regex fallback
+    text_lower = response_text.lower()
     if "female" in text_lower or "woman" in text_lower or "girl" in text_lower:
         result["gender"] = "female"
     elif "male" in text_lower or "man" in text_lower or "boy" in text_lower:
         result["gender"] = "male"
 
     for age_r in ["18-24", "25-34", "35-44", "45+"]:
-        if age_r in text:
+        if age_r in response_text:
             result["age_range"] = age_r
             break
     else:
-        if "18-" in text or "under 18" in text_lower:
+        if "18-" in response_text or "under 18" in text_lower:
             result["age_range"] = "18-"
 
     return result
@@ -369,8 +343,8 @@ def gpu_consumer(
     sampling_params = SamplingParams(
         max_tokens=MAX_NEW_TOKENS,
         temperature=0.0,
-        stop=["\n"],
-        min_tokens=2,
+        stop=["\n\n"],
+        min_tokens=5,
     )
 
     total_predicted = 0
@@ -878,16 +852,6 @@ async def main():
         summary_rows.append(result)
         csv_rows_buffer.append(_flatten_result_to_csv_row(result))
         successfully_processed += 1
-
-        # İlk 4 influencer sonuçlarını detaylı print et
-        if successfully_processed <= 4:
-            log.info(f"\n{'='*50}")
-            log.info(f"📋 SONUÇ #{successfully_processed}: @{inf_username}")
-            log.info(f"  Takipçi sayısı: {len(data['follower_usernames'])}")
-            log.info(f"  Nationality: {json.dumps(data['nationality'], ensure_ascii=False)}")
-            log.info(f"  Gender: {json.dumps(gender_dist, ensure_ascii=False)}")
-            log.info(f"  Age: {json.dumps(age_dist, ensure_ascii=False)}")
-            log.info(f"{'='*50}\n")
 
         # Her BATCH_CSV_SIZE influencer'da bir CSV dosyası kaydet
         if len(csv_rows_buffer) >= BATCH_CSV_SIZE:
