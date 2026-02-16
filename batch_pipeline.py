@@ -18,6 +18,7 @@ import os
 if "HF_HOME" not in os.environ:
     os.environ["HF_HOME"] = "/workspace/huggingface_cache"
 
+
 import gc
 import re
 import json
@@ -44,8 +45,9 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 #  CONFIG
 # =====================================================================
-CSV_FILE = "speed_test_4k.csv"        # Influencer username listesi
+CSV_FILE = "speed_test_4k.csv"         # Influencer username listesi
 RESULTS_DIR = "batch_results"          # Çıktı klasörü
+MAX_INFLUENCERS = 500                  # İlk N influencer'ı işle (0 = hepsi)
 
 CONCURRENCY_X = 6                     # Aynı anda kaç influencer'ın takipçisi çekilecek (A40 için artırıldı)
 FOLLOWER_COUNT = 1200                  # Her influencer için çekilecek takipçi sayısı
@@ -58,11 +60,11 @@ GPU_QUEUE_MAXSIZE = 15_000            # Queue backpressure: CPU GPU'ya çok fark
 
 HASHMAP_MAX_SIZE = 1_000_000          # Follower cache max entry
 CACHE_SAVE_INTERVAL = 50              # Kaç chunk'ta bir cache diske yazılsın
-BATCH_CSV_SIZE = 50                   # Kaç influencer'da bir ara CSV dosyası oluşturulacak
+BATCH_CSV_SIZE = 6                    # Kaç influencer'da bir ara CSV dosyası oluşturulacak
 
 GPU_MEMORY_UTILIZATION = 0.95         # A40 48GB — daha fazla VRAM kullan
 MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
-MAX_NEW_TOKENS = 20
+MAX_NEW_TOKENS = 6                    # Ultra-kısa çıktı: "M 25-34" gibi
 MAX_MODEL_LEN = 1536
 
 # RapidAPI
@@ -73,14 +75,15 @@ API_KEY = os.environ.get("API_KEY", "a8cad3edb7msh3e877eda255d39dp1d44e6jsn06c6f
 VALID_GENDERS = {"male", "female", "unknown"}
 VALID_AGE_RANGES = {"18-", "18-24", "25-34", "35-44", "45+", "unknown"}
 
+# Ultra-kısa prompt: çıktıyı minimize et = daha hızlı inference
 CLASSIFICATION_PROMPT = (
     "Look at this profile picture. "
-    "If there is a human, estimate their gender (male or female) and age range. "
-    "Age ranges: 18- (under 18), 18-24, 25-34, 35-44, 45+. "
-    "Respond ONLY with a JSON object, nothing else: "
-    '{"gender": "male/female/unknown", "age_range": "18-/18-24/25-34/35-44/45+/unknown"}'
-    "\nIf no human is visible, respond: "
-    '{"gender": "unknown", "age_range": "unknown"}'
+    "Respond with ONLY gender and age, nothing else. "
+    "Gender: M (male), W (female), U (unknown). "
+    "Age: 18- 18-24 25-34 35-44 45+ U. "
+    "Format: GENDER AGE\n"
+    "Examples: M 25-34 | W 18-24 | U U\n"
+    "Answer:"
 )
 
 
@@ -286,12 +289,37 @@ def build_qwen_prompt(processor) -> str:
 #  VLM RESPONSE PARSING
 # =====================================================================
 def parse_vlm_response(response_text: str) -> Dict[str, str]:
-    """VLM çıktısını parse eder. JSON dener, başarısız olursa regex fallback."""
+    """
+    Ultra-kısa VLM çıktısını parse eder.
+    Beklenen format: 'M 25-34' veya 'W 18-24' veya 'U U'
+    Fallback: JSON ve regex parse da desteklenir.
+    """
     result = {"gender": "unknown", "age_range": "unknown"}
+    text = response_text.strip()
 
-    # 1) JSON parse
+    # 1) Ultra-kısa format parse: "M 25-34", "W U", vs.
+    parts = text.split()
+    if len(parts) >= 1:
+        g = parts[0].upper()
+        if g == "M":
+            result["gender"] = "male"
+        elif g in ("W", "F"):
+            result["gender"] = "female"
+        elif g == "U":
+            result["gender"] = "unknown"
+
+    if len(parts) >= 2:
+        age = parts[1].strip()
+        if age in VALID_AGE_RANGES:
+            result["age_range"] = age
+
+    # Eğer kısa format işe yaradıysa dön
+    if result["gender"] != "unknown" or result["age_range"] != "unknown":
+        return result
+
+    # 2) JSON fallback
     try:
-        json_match = re.search(r'\{[^}]+\}', response_text)
+        json_match = re.search(r'\{[^}]+\}', text)
         if json_match:
             parsed = json.loads(json_match.group())
             gender = str(parsed.get("gender", "unknown")).strip().lower()
@@ -302,19 +330,19 @@ def parse_vlm_response(response_text: str) -> Dict[str, str]:
     except (json.JSONDecodeError, AttributeError):
         pass
 
-    # 2) Regex fallback
-    text_lower = response_text.lower()
+    # 3) Regex fallback
+    text_lower = text.lower()
     if "female" in text_lower or "woman" in text_lower or "girl" in text_lower:
         result["gender"] = "female"
     elif "male" in text_lower or "man" in text_lower or "boy" in text_lower:
         result["gender"] = "male"
 
     for age_r in ["18-24", "25-34", "35-44", "45+"]:
-        if age_r in response_text:
+        if age_r in text:
             result["age_range"] = age_r
             break
     else:
-        if "18-" in response_text or "under 18" in text_lower:
+        if "18-" in text or "under 18" in text_lower:
             result["age_range"] = "18-"
 
     return result
@@ -341,8 +369,8 @@ def gpu_consumer(
     sampling_params = SamplingParams(
         max_tokens=MAX_NEW_TOKENS,
         temperature=0.0,
-        stop=["\n\n"],
-        min_tokens=5,
+        stop=["\n"],
+        min_tokens=2,
     )
 
     total_predicted = 0
@@ -573,6 +601,8 @@ async def main():
     df_csv = pd.read_csv(CSV_FILE)
     col_name = df_csv.columns[0]  # İlk column = username
     all_influencers = df_csv[col_name].dropna().astype(str).tolist()
+    if MAX_INFLUENCERS > 0:
+        all_influencers = all_influencers[:MAX_INFLUENCERS]
     log.info(f"  Toplam influencer: {len(all_influencers)}")
 
     # ----- 3. Resume desteği -----
