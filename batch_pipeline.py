@@ -47,7 +47,7 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 CSV_FILE = "speed_test_4k.csv"         # Influencer username listesi
 RESULTS_DIR = "batch_results"          # Çıktı klasörü
-MAX_INFLUENCERS = 500                  # İlk N influencer'ı işle (0 = hepsi)
+MAX_INFLUENCERS = 15                  # İlk N influencer'ı işle (0 = hepsi)
 
 CONCURRENCY_X = 6                     # Aynı anda kaç influencer'ın takipçisi çekilecek (A40 için artırıldı)
 FOLLOWER_COUNT = 1200                  # Her influencer için çekilecek takipçi sayısı
