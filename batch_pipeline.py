@@ -46,7 +46,7 @@ warnings.filterwarnings('ignore')
 #  CONFIG
 # =====================================================================
 CSV_FILE = "speed_test_4k.csv"         # Influencer username listesi
-RESULTS_DIR = "batch_results"          # Çıktı klasörü
+RESULTS_DIR = "/workspace/batch_results"  # Çıktı klasörü (volume dışı, erişilebilir)
 MAX_INFLUENCERS = 15                  # İlk N influencer'ı işle (0 = hepsi)
 
 CONCURRENCY_X = 6                     # Aynı anda kaç influencer'ın takipçisi çekilecek (A40 için artırıldı)
@@ -878,6 +878,16 @@ async def main():
         summary_rows.append(result)
         csv_rows_buffer.append(_flatten_result_to_csv_row(result))
         successfully_processed += 1
+
+        # İlk 4 influencer sonuçlarını detaylı print et
+        if successfully_processed <= 4:
+            log.info(f"\n{'='*50}")
+            log.info(f"📋 SONUÇ #{successfully_processed}: @{inf_username}")
+            log.info(f"  Takipçi sayısı: {len(data['follower_usernames'])}")
+            log.info(f"  Nationality: {json.dumps(data['nationality'], ensure_ascii=False)}")
+            log.info(f"  Gender: {json.dumps(gender_dist, ensure_ascii=False)}")
+            log.info(f"  Age: {json.dumps(age_dist, ensure_ascii=False)}")
+            log.info(f"{'='*50}\n")
 
         # Her BATCH_CSV_SIZE influencer'da bir CSV dosyası kaydet
         if len(csv_rows_buffer) >= BATCH_CSV_SIZE:
