@@ -52,7 +52,7 @@ MAX_INFLUENCERS = 15                   # CSV'den kaç influencer okunacak (0 = h
 CONCURRENCY_X = 6                     # Aynı anda kaç influencer'ın takipçisi çekilecek (A40 için artırıldı)
 FOLLOWER_COUNT = 800                   # Her influencer için çekilecek takipçi sayısı
 
-GPU_DRAIN_INTERVAL = 1.0              # Queue'dan item toplama max bekleme süresi (saniye)
+GPU_DRAIN_INTERVAL = 0.5             # Queue'dan item toplama max bekleme süresi (saniye)
 
 MAX_CONCURRENT_DOWNLOADS = 500        # Eşzamanlı avatar indirme limiti (A40 — hızlı CPU/network)
 DOWNLOAD_TIMEOUT_SECONDS = 3          # Avatar indirme timeout
@@ -64,7 +64,7 @@ BATCH_CSV_SIZE = 6                    # Kaç influencer'da bir ara CSV dosyası 
 
 GPU_MEMORY_UTILIZATION = 0.95         # A40 48GB — daha fazla VRAM kullan
 MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct"
-MAX_NEW_TOKENS = 20
+MAX_NEW_TOKENS = 10
 MAX_MODEL_LEN = 1536
 
 # RapidAPI
